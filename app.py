@@ -1,10 +1,16 @@
 
-import os
+from pathlib import Path
+import html
 import unicodedata
 
-import folium
 import geopandas as gpd
+import joblib
+import folium
+import numpy as np
+import pandas as pd
 import streamlit as st
+
+from branca.element import Element
 from streamlit_folium import st_folium
 
 
@@ -16,58 +22,28 @@ st.set_page_config(
     page_title="Dashboard LULC Jawa Timur",
     page_icon="🌏",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-st.markdown(
-    """
-    <style>
-        .block-container {
-            padding-top: 1.8rem;
-            padding-bottom: 2rem;
-        }
+BASE_DIR = Path(__file__).resolve().parent
+GEOJSON_PATH = BASE_DIR / "sampel_uts_jatim_fix.geojson"
+MODEL_PATH = BASE_DIR / "model_LULC_jatim_fix.joblib"
 
-        .dashboard-subtitle {
-            color: #64748b;
-            font-size: 1rem;
-            margin-top: -0.5rem;
-            margin-bottom: 1.5rem;
-        }
-
-        div[data-testid="stMetric"] {
-            background-color: #f8fafc;
-            border: 1px solid #e2e8f0;
-            padding: 16px;
-            border-radius: 12px;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.title("🌏 Dashboard Interaktif Tutupan Lahan (LULC) Jawa Timur")
-st.markdown(
-    '<p class="dashboard-subtitle">'
-    "Visualisasi dan eksplorasi data poligon Land Use / Land Cover "
-    "secara interaktif."
-    "</p>",
-    unsafe_allow_html=True,
-)
-
-
-# =========================================================
-# 2. KONFIGURASI DATA DAN KELAS
-# =========================================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_PATH = os.path.join(BASE_DIR, "sampel_uts_jatim_fix.geojson")
+CLASS_ORDER = [
+    "Bangunan",
+    "Pertanian",
+    "Air",
+    "Hutan",
+    "Mangrove",
+]
 
 CLASS_COLORS = {
-    "Bangunan": "#E53935",  # Merah
-    "Pertanian": "#8BC34A",  # Hijau muda
-    "Air": "#2196F3",       # Biru
-    "Hutan": "#1B5E20",     # Hijau tua
-    "Mangrove": "#8E24AA",  # Ungu
+    "Bangunan": "#E53935",
+    "Pertanian": "#FBC02D",
+    "Air": "#2196F3",
+    "Hutan": "#1B5E20",
+    "Mangrove": "#8E24AA",
+    "Tidak diketahui": "#9E9E9E",
 }
 
 CLASS_CODES = {
@@ -79,31 +55,68 @@ CLASS_CODES = {
     "m": "Mangrove",
 }
 
-CLASS_ORDER = [
-    "Bangunan",
-    "Pertanian",
-    "Air",
-    "Hutan",
-    "Mangrove",
-]
+# Hasil evaluasi sesuai angka yang diberikan dalam blueprint.
+# Ganti hanya jika laporan evaluasi final berbeda.
+MODEL_ACCURACY = 0.776
 
+F1_SCORES = {
+    "Bangunan": 0.95,
+    "Pertanian": 0.50,
+    "Air": 0.91,
+    "Hutan": 0.59,
+    "Mangrove": 0.91,
+}
+
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1.5rem;
+        padding-bottom: 2rem;
+    }
+
+    [data-testid="stMetric"] {
+        background: var(--secondary-background-color);
+        border: 1px solid rgba(128,128,128,.2);
+        border-radius: 12px;
+        padding: 14px;
+    }
+
+    h1, h2, h3 {
+        letter-spacing: -0.3px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("Dashboard Interaktif Tutupan Lahan (LULC) Jawa Timur")
+st.caption(
+    "Eksplorasi data spasial, hasil evaluasi klasifikasi, "
+    "dan distribusi kategori tutupan lahan."
+)
+
+
+# =========================================================
+# 2. FUNGSI UTILITAS
+# =========================================================
 
 def normalize_text(value):
-    """Membersihkan teks untuk mempermudah identifikasi kelas."""
-    if value is None:
+    if pd.isna(value):
         return ""
 
-    text = unicodedata.normalize("NFKC", str(value))
-    return text.strip().lower()
+    return unicodedata.normalize(
+        "NFKC", str(value)
+    ).strip().lower()
 
 
-def classify_land_cover(kelas_value, nama_value):
+def classify_land_cover(kelas, nama):
     """
-    Menentukan kelas tutupan lahan.
-    Prioritas: kolom Kelas yang dikenali, lalu kolom Nama.
+    Prioritas klasifikasi:
+    1. Nilai kolom Kelas yang dikenali.
+    2. Huruf pertama kolom Nama.
     """
 
-    # Nama kelas lengkap yang mungkin ditemukan dalam data
     full_names = {
         "bangunan": "Bangunan",
         "pertanian": "Pertanian",
@@ -112,8 +125,7 @@ def classify_land_cover(kelas_value, nama_value):
         "mangrove": "Mangrove",
     }
 
-    # Periksa kolom Kelas terlebih dahulu
-    kelas_text = normalize_text(kelas_value)
+    kelas_text = normalize_text(kelas)
 
     if kelas_text in CLASS_CODES:
         return CLASS_CODES[kelas_text]
@@ -121,8 +133,7 @@ def classify_land_cover(kelas_value, nama_value):
     if kelas_text in full_names:
         return full_names[kelas_text]
 
-    # Jika Kelas kosong atau tidak dikenali, gunakan Nama
-    nama_text = normalize_text(nama_value)
+    nama_text = normalize_text(nama)
 
     if nama_text:
         first_letter = nama_text[0]
@@ -130,48 +141,38 @@ def classify_land_cover(kelas_value, nama_value):
         if first_letter in CLASS_CODES:
             return CLASS_CODES[first_letter]
 
-        # Mendukung nilai Nama yang berupa nama kelas lengkap
         if nama_text in full_names:
             return full_names[nama_text]
 
-    return "Tidak Diketahui"
+    return "Tidak diketahui"
 
 
 # =========================================================
-# 3. MEMBACA GEOJSON SECARA OTOMATIS (READ-ONLY)
+# 3. MEMUAT DATA DAN MODEL
 # =========================================================
 
 @st.cache_data(show_spinner="Memuat data geospasial...")
-def load_geojson(file_path, modified_time):
-    """
-    Membaca GeoJSON tanpa mengubah file sumber.
-    modified_time digunakan agar cache diperbarui
-    ketika file sumber berubah.
-    """
+def load_geojson(path, modified_time):
     del modified_time
 
-    gdf = gpd.read_file(file_path)
+    data = gpd.read_file(path)
 
-    if gdf.empty:
-        raise ValueError("File GeoJSON tidak memiliki fitur.")
+    if data.empty:
+        raise ValueError("GeoJSON tidak memiliki fitur.")
 
-    if gdf.crs is None:
-        # GeoJSON umumnya menggunakan koordinat WGS84.
-        # Pastikan CRS sumber benar sebelum menetapkannya.
-        gdf = gdf.set_crs("EPSG:4326")
+    if data.crs is None:
+        # GeoJSON standar menggunakan koordinat WGS84.
+        data = data.set_crs("EPSG:4326")
+    else:
+        data = data.to_crs("EPSG:4326")
 
-    elif gdf.crs.to_epsg() != 4326:
-        gdf = gdf.to_crs("EPSG:4326")
+    if "Kelas" not in data.columns:
+        data["Kelas"] = None
 
-    # Pastikan kolom yang dibutuhkan tersedia
-    if "Kelas" not in gdf.columns:
-        gdf["Kelas"] = None
+    if "Nama" not in data.columns:
+        data["Nama"] = None
 
-    if "Nama" not in gdf.columns:
-        gdf["Nama"] = None
-
-    # Klasifikasi setiap fitur
-    gdf["kelas_dashboard"] = gdf.apply(
+    data["kelas_dashboard"] = data.apply(
         lambda row: classify_land_cover(
             row["Kelas"],
             row["Nama"],
@@ -179,250 +180,453 @@ def load_geojson(file_path, modified_time):
         axis=1,
     )
 
-    # Hanya tampilkan fitur dengan geometri yang tersedia
-    gdf = gdf.loc[
-        gdf.geometry.notna() & ~gdf.geometry.is_empty
+    data = data.loc[
+        data.geometry.notna()
+        & ~data.geometry.is_empty
     ].copy()
 
-    if gdf.empty:
-        raise ValueError("Tidak ditemukan geometri poligon yang valid.")
+    if data.empty:
+        raise ValueError("Tidak ditemukan geometri valid.")
 
-    return gdf
+    return data
 
 
-if not os.path.exists(DATA_PATH):
+@st.cache_resource(show_spinner="Memuat model klasifikasi...")
+def load_model(path, modified_time):
+    del modified_time
+    return joblib.load(path)
+
+
+# Validasi file sebelum pemrosesan
+if not GEOJSON_PATH.exists():
     st.error(
-        "File GeoJSON tidak ditemukan. Pastikan "
-        "`sampel_uts_jatim_fix.geojson` berada di folder yang sama "
-        "dengan `app.py`."
+        f"GeoJSON tidak ditemukan: {GEOJSON_PATH.name}. "
+        "Pastikan file berada satu folder dengan app.py."
+    )
+    st.stop()
+
+if not MODEL_PATH.exists():
+    st.error(
+        f"Model tidak ditemukan: {MODEL_PATH.name}. "
+        "Pastikan file model berada satu folder dengan app.py."
     )
     st.stop()
 
 try:
     gdf = load_geojson(
-        DATA_PATH,
-        os.path.getmtime(DATA_PATH),
+        str(GEOJSON_PATH),
+        GEOJSON_PATH.stat().st_mtime,
     )
+
+    model = load_model(
+        str(MODEL_PATH),
+        MODEL_PATH.stat().st_mtime,
+    )
+
 except Exception as exc:
-    st.error(f"Gagal membaca data geospasial: {exc}")
+    st.error(f"Gagal memuat data atau model: {exc}")
     st.stop()
 
 
 # =========================================================
-# 4. FILTER KELAS TUTUPAN LAHAN
+# 4. SIDEBAR: PERFORMA MODEL
 # =========================================================
 
-available_classes = [
-    kelas
-    for kelas in CLASS_ORDER
-    if kelas in gdf["kelas_dashboard"].unique()
+st.sidebar.title("Panel Model")
+st.sidebar.caption("Ringkasan evaluasi klasifikasi")
+
+st.sidebar.metric(
+    "Akurasi Validasi Wilayah",
+    f"{MODEL_ACCURACY:.2%}",
+    help=(
+        "Nilai dari hasil evaluasi yang tercantum "
+        "dalam blueprint."
+    ),
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("Feature Importance")
+
+
+def get_feature_importance(estimator):
+    """
+    Mengambil feature importance dari model yang mendukung
+    feature_importances_ atau koefisien linear.
+
+    Untuk Pipeline, periksa estimator terakhir.
+    """
+
+    candidates = [estimator]
+
+    if hasattr(estimator, "steps") and estimator.steps:
+        candidates.append(estimator.steps[-1][1])
+
+    for candidate in reversed(candidates):
+        if hasattr(candidate, "feature_importances_"):
+            values = np.asarray(
+                candidate.feature_importances_
+            ).ravel()
+
+        elif hasattr(candidate, "coef_"):
+            values = np.asarray(
+                candidate.coef_
+            )
+
+            if values.ndim == 2:
+                values = np.mean(
+                    np.abs(values),
+                    axis=0,
+                )
+            else:
+                values = np.abs(values).ravel()
+
+        else:
+            continue
+
+        if not len(values):
+            continue
+
+        names = getattr(
+            candidate,
+            "feature_names_in_",
+            None,
+        )
+
+        if names is None:
+            names = getattr(
+                estimator,
+                "feature_names_in_",
+                None,
+            )
+
+        if names is None or len(names) != len(values):
+            names = [
+                f"Fitur {i + 1}"
+                for i in range(len(values))
+            ]
+
+        result = pd.DataFrame({
+            "Fitur": list(names),
+            "Importance": values,
+        })
+
+        return result.sort_values(
+            "Importance",
+            ascending=False,
+        )
+
+    return pd.DataFrame()
+
+
+importance_df = get_feature_importance(model)
+
+if not importance_df.empty:
+    st.sidebar.dataframe(
+        importance_df,
+        use_container_width=True,
+        hide_index=True,
+        height=260,
+    )
+else:
+    st.sidebar.info(
+        "Model tidak menyediakan feature_importances_ "
+        "atau koefisien yang dapat ditampilkan. "
+        "Nilai importance tidak dibuat secara manual."
+    )
+
+
+# =========================================================
+# 5. METRIK F1-SCORE PER KELAS
+# =========================================================
+
+st.subheader("Ringkasan Performa Klasifikasi")
+
+metric_cols = st.columns(5)
+
+for col, kelas in zip(metric_cols, CLASS_ORDER):
+    with col:
+        st.metric(
+            label=f"F1-Score {kelas}",
+            value=f"{F1_SCORES[kelas]:.2f}",
+        )
+
+st.info(
+    "Interpretasi: skor F1 menunjukkan keseimbangan "
+    "precision dan recall. Perbedaan skor antarkelas "
+    "menunjukkan bahwa performa model tidak merata. "
+    "Khusus kelas Pertanian dan Hutan, hasil evaluasi "
+    "perlu diperhatikan lebih lanjut."
+)
+
+
+# =========================================================
+# 6. FILTER DATA SPASIAL
+# =========================================================
+
+st.divider()
+st.subheader("Eksplorasi Data Spasial")
+
+# Deteksi kolom klaster jika tersedia.
+# Tidak mengasumsikan semua GeoJSON memiliki kolom DBSCAN.
+cluster_candidates = [
+    col for col in gdf.columns
+    if any(
+        key in col.lower()
+        for key in ["cluster", "dbscan", "klaster"]
+    )
+    and col != "geometry"
 ]
 
-unknown_count = int(
-    (gdf["kelas_dashboard"] == "Tidak Diketahui").sum()
-)
+filter_col, info_col = st.columns([3, 1])
 
-if unknown_count:
-    available_classes.append("Tidak Diketahui")
+with filter_col:
+    selected_classes = st.multiselect(
+        "Filter kelas tutupan lahan",
+        options=[
+            kelas
+            for kelas in CLASS_ORDER
+            if kelas in gdf["kelas_dashboard"].unique()
+        ],
+        default=[
+            kelas
+            for kelas in CLASS_ORDER
+            if kelas in gdf["kelas_dashboard"].unique()
+        ],
+        key="filter_kelas",
+    )
 
-st.subheader("Filter Tutupan Lahan")
-
-selected_classes = st.multiselect(
-    "Pilih kategori yang ingin ditampilkan pada peta:",
-    options=available_classes,
-    default=available_classes,
-    help="Pilih satu atau beberapa kelas untuk memfilter poligon.",
-)
+with info_col:
+    st.metric(
+        "Total Poligon",
+        f"{len(gdf):,}",
+    )
 
 filtered_gdf = gdf[
     gdf["kelas_dashboard"].isin(selected_classes)
 ].copy()
 
+selected_cluster_col = None
 
-# =========================================================
-# 5. KARTU METRIK
-# =========================================================
-
-metric_col1, metric_col2 = st.columns(2)
-
-with metric_col1:
-    st.metric(
-        label="Total Sampel Poligon",
-        value=f"{len(filtered_gdf):,}",
-        help="Jumlah poligon yang sesuai dengan filter aktif.",
+if cluster_candidates:
+    selected_cluster_col = st.selectbox(
+        "Kolom wilayah/klaster",
+        options=cluster_candidates,
+        help="Pilih kolom klaster yang benar dari GeoJSON.",
     )
 
-with metric_col2:
-    active_categories = filtered_gdf["kelas_dashboard"].nunique()
-
-    st.metric(
-        label="Kategori Aktif",
-        value=f"{active_categories}",
-        help="Jumlah kategori yang benar-benar muncul pada hasil filter.",
+    cluster_values = sorted(
+        filtered_gdf[selected_cluster_col]
+        .dropna()
+        .unique()
+        .tolist(),
+        key=str,
     )
+
+    selected_clusters = st.multiselect(
+        "Filter klaster",
+        options=cluster_values,
+        default=cluster_values,
+    )
+
+    filtered_gdf = filtered_gdf[
+        filtered_gdf[selected_cluster_col].isin(
+            selected_clusters
+        )
+    ].copy()
+
+
+# =========================================================
+# 7. PETA INTERAKTIF
+# =========================================================
+
+st.divider()
+st.subheader("Peta Tutupan Lahan Jawa Timur")
+
+map_col, legend_col = st.columns(
+    [4, 1],
+    gap="medium",
+)
+
+with legend_col:
+    st.markdown("#### Legenda")
+
+    for kelas in CLASS_ORDER:
+        if kelas in selected_classes:
+            color = CLASS_COLORS[kelas]
+
+            st.markdown(
+                f"""
+                <div style="display:flex;align-items:center;
+                            gap:8px;margin:10px 0;">
+                    <span style="display:inline-block;
+                                 width:15px;height:15px;
+                                 border-radius:3px;
+                                 background:{color};"></span>
+                    <span>{html.escape(kelas)}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        f"{len(filtered_gdf):,} poligon ditampilkan."
+    )
+
+
+with map_col:
+    # Pusat awal Jawa Timur
+    m = folium.Map(
+        location=[-7.6, 112.5],
+        zoom_start=8,
+        tiles=None,
+        control_scale=True,
+        dragging=False,
+        scrollWheelZoom=True,
+        doubleClickZoom=True,
+        touchZoom=True,
+        zoomControl=True,
+        keyboard=False,
+        preferCanvas=True,
+    )
+
+    # Basemap OpenStreetMap
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="OpenStreetMap",
+        control=True,
+        show=True,
+    ).add_to(m)
+
+    # Citra satelit Esri
+    folium.TileLayer(
+        tiles=(
+            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        ),
+        attr=(
+            "Esri, Maxar, Earthstar Geographics, "
+            "and the GIS User Community"
+        ),
+        name="Esri World Imagery",
+        overlay=False,
+        control=True,
+        show=False,
+    ).add_to(m)
+
+    # Fit seluruh poligon terfilter.
+    # Jika tidak ada data, pusat awal tetap Jawa Timur.
+    if not filtered_gdf.empty:
+        minx, miny, maxx, maxy = (
+            filtered_gdf.total_bounds
+        )
+
+        m.fit_bounds(
+            [[miny, minx], [maxy, maxx]],
+            padding=(20, 20),
+        )
+
+        def polygon_style(feature):
+            kelas = feature["properties"].get(
+                "kelas_dashboard",
+                "Tidak diketahui",
+            )
+
+            color = CLASS_COLORS.get(
+                kelas,
+                CLASS_COLORS["Tidak diketahui"],
+            )
+
+            return {
+                "color": color,
+                "fillColor": color,
+                "weight": 1.5,
+                "opacity": 0.6,
+                "fillOpacity": 0.4,
+            }
+
+        tooltip_fields = ["kelas_dashboard"]
+        tooltip_aliases = ["Kelas:"]
+
+        if (
+            "Nama" in filtered_gdf.columns
+            and filtered_gdf["Nama"].notna().any()
+        ):
+            tooltip_fields.insert(0, "Nama")
+            tooltip_aliases.insert(0, "Nama: ")
+
+        folium.GeoJson(
+            filtered_gdf.to_json(),
+            name="Poligon LULC",
+            style_function=polygon_style,
+            tooltip=folium.GeoJsonTooltip(
+                fields=tooltip_fields,
+                aliases=tooltip_aliases,
+                sticky=True,
+            ),
+        ).add_to(m)
+
+    else:
+        st.warning(
+            "Tidak ada poligon yang cocok dengan filter."
+        )
+
+    folium.LayerControl(
+        position="topright",
+        collapsed=False,
+    ).add_to(m)
+
+    # Kunci dragging melalui Leaflet setelah map diinisialisasi.
+    # Zoom tetap aktif.
+    map_name = m.get_name()
+
+    m.get_root().script.add_child(
+        Element(
+            f"""
+            {map_name}.dragging.disable();
+            {map_name}.scrollWheelZoom.enable();
+            {map_name}.doubleClickZoom.enable();
+            {map_name}.touchZoom.enable();
+            """
+        )
+    )
+
+    st_folium(
+        m,
+        key="lulc_map",
+        height=650,
+        use_container_width=True,
+        returned_objects=[],
+    )
+
+
+# =========================================================
+# 8. TABEL ATRIBUT
+# =========================================================
+
+st.divider()
+st.subheader("Inspeksi Atribut Poligon")
 
 st.caption(
-    f"Total data terbaca: {len(gdf):,} poligon | "
-    f"Kategori tersedia: {len(available_classes)}"
+    "Tabel mengikuti filter kelas dan klaster yang aktif. "
+    "Kolom geometri tidak ditampilkan."
 )
 
-
-# =========================================================
-# 6. MEMBUAT PETA FOLIUM
-# =========================================================
-
-st.subheader("Peta Sebaran Tutupan Lahan")
-
-# Tentukan titik tengah berdasarkan seluruh data agar
-# tampilan peta tidak berubah ekstrem ketika filter diganti.
-bounds = gdf.total_bounds
-minx, miny, maxx, maxy = bounds
-
-center_lat = (miny + maxy) / 2
-center_lon = (minx + maxx) / 2
-
-lulc_map = folium.Map(
-    location=[center_lat, center_lon],
-    zoom_start=10,
-    tiles=None,
-    control_scale=True,
-    dragging=False,
-    scrollWheelZoom=True,
-    zoomControl=True,
-    doubleClickZoom=True,
-    touchZoom=True,
-)
-
-# Basemap Google Satellite
-folium.TileLayer(
-    tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}",
-    attr="Map data © Google",
-    name="Google Satellite",
-    overlay=False,
-    control=False,
-    show=True,
-).add_to(lulc_map)
-
-
-# =========================================================
-# 7. STYLE POLIGON DAN TOOLTIP
-# =========================================================
-
-def style_polygon(feature):
-    """Mengatur warna isi dan garis tepi poligon."""
-
-    kelas = feature["properties"].get(
-        "kelas_dashboard",
-        "Tidak Diketahui",
+attribute_df = pd.DataFrame(
+    filtered_gdf.drop(
+        columns=["geometry"],
+        errors="ignore",
     )
-
-    color = CLASS_COLORS.get(kelas, "#9E9E9E")
-
-    return {
-        "fillColor": color,
-        "color": color,
-        "weight": 1.5,
-        "opacity": 0.6,
-        "fillOpacity": 0.4,
-    }
-
-
-if not filtered_gdf.empty:
-    tooltip_fields = ["kelas_dashboard"]
-    tooltip_aliases = ["Kategori Tutupan Lahan"]
-
-    # Tambahkan informasi Nama jika tersedia dan terisi
-    if "Nama" in filtered_gdf.columns:
-        if filtered_gdf["Nama"].notna().any():
-            tooltip_fields.insert(0, "Nama")
-            tooltip_aliases.insert(0, "Nama Poligon")
-
-    folium.GeoJson(
-        data=filtered_gdf.to_json(),
-        name="Tutupan Lahan",
-        style_function=style_polygon,
-        tooltip=folium.GeoJsonTooltip(
-            fields=tooltip_fields,
-            aliases=tooltip_aliases,
-            sticky=True,
-            localize=True,
-        ),
-    ).add_to(lulc_map)
-
-else:
-    st.info(
-        "Tidak ada poligon untuk kategori yang dipilih. "
-        "Silakan aktifkan setidaknya satu kategori."
-    )
-
-
-# =========================================================
-# 8. LEGENDA PETA
-# =========================================================
-
-legend_items = [
-    (kelas, CLASS_COLORS[kelas])
-    for kelas in CLASS_ORDER
-    if kelas in available_classes and kelas in selected_classes
-]
-
-if "Tidak Diketahui" in selected_classes:
-    legend_items.append(("Tidak Diketahui", "#9E9E9E"))
-
-legend_html = """
-<div style="
-    position: fixed;
-    bottom: 25px;
-    left: 25px;
-    z-index: 9999;
-    background: white;
-    padding: 12px 16px;
-    border: 1px solid #d1d5db;
-    border-radius: 10px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-    font-size: 13px;
-    color: #1f2937;
-">
-    <b style="font-size:14px;">Legenda Tutupan Lahan</b>
-    <div style="margin-top:8px;">
-"""
-
-for kelas, color in legend_items:
-    legend_html += f"""
-        <div style="display:flex; align-items:center; margin:5px 0;">
-            <span style="
-                display:inline-block;
-                width:13px;
-                height:13px;
-                background:{color};
-                border:1px solid {color};
-                margin-right:8px;
-                border-radius:2px;
-            "></span>
-            <span>{kelas}</span>
-        </div>
-    """
-
-legend_html += "</div></div>"
-
-lulc_map.get_root().html.add_child(
-    folium.Element(legend_html)
 )
 
-
-# =========================================================
-# 9. MENAMPILKAN PETA DI STREAMLIT
-# =========================================================
-
-st_folium(
-    lulc_map,
+st.dataframe(
+    attribute_df,
     use_container_width=True,
-    height=650,
-    returned_objects=[],
+    hide_index=True,
+    height=350,
 )
 
 st.caption(
     "Sumber data: sampel_uts_jatim_fix.geojson. "
-    "Peta menggunakan basemap Google Satellite. "
-    "Data sumber hanya dibaca dan tidak dimodifikasi oleh aplikasi."
+    "Aplikasi hanya membaca file sumber dan tidak "
+    "menyimpan perubahan ke GeoJSON."
 )
