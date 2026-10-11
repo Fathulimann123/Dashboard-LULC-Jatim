@@ -57,14 +57,14 @@ CLASS_CODES = {
 
 # Hasil evaluasi sesuai angka yang diberikan dalam blueprint.
 # Ganti hanya jika laporan evaluasi final berbeda.
-MODEL_ACCURACY = 0.776
+MODEL_ACCURACY = 0.7584
 
 F1_SCORES = {
     "Bangunan": 0.95,
-    "Pertanian": 0.50,
-    "Air": 0.91,
-    "Hutan": 0.59,
-    "Mangrove": 0.91,
+    "Pertanian": 0.47,
+    "Air": 0.88,
+    "Hutan": 0.74,
+    "Mangrove": 0.77,
 }
 
 st.markdown(
