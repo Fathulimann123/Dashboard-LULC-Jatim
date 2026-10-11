@@ -1,10 +1,4 @@
 streamlit
-streamlit-folium
-folium
 geopandas
-pandas
-numpy
-rasterio
-openeo
-scikit-learn
-joblib
+folium
+streamlit-folium
