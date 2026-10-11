@@ -238,89 +238,19 @@ st.sidebar.caption("Ringkasan evaluasi klasifikasi")
 st.sidebar.metric(
     "Akurasi Validasi Wilayah",
     f"{MODEL_ACCURACY:.2%}",
-    help=(
-        "Nilai dari hasil evaluasi yang tercantum "
-        "dalam blueprint."
-    ),
+    help="Nilai dari hasil evaluasi validasi silang spasial."
 )
 
 st.sidebar.divider()
 st.sidebar.subheader("Feature Importance")
 
-
-def get_feature_importance(estimator):
-    """
-    Mengambil feature importance dari model yang mendukung
-    feature_importances_ atau koefisien linear.
-
-    Untuk Pipeline, periksa estimator terakhir.
-    """
-
-    candidates = [estimator]
-
-    if hasattr(estimator, "steps") and estimator.steps:
-        candidates.append(estimator.steps[-1][1])
-
-    for candidate in reversed(candidates):
-        if hasattr(candidate, "feature_importances_"):
-            values = np.asarray(
-                candidate.feature_importances_
-            ).ravel()
-
-        elif hasattr(candidate, "coef_"):
-            values = np.asarray(
-                candidate.coef_
-            )
-
-            if values.ndim == 2:
-                values = np.mean(
-                    np.abs(values),
-                    axis=0,
-                )
-            else:
-                values = np.abs(values).ravel()
-
-        else:
-            continue
-
-        if not len(values):
-            continue
-
-        names = getattr(
-            candidate,
-            "feature_names_in_",
-            None,
-        )
-
-        if names is None:
-            names = getattr(
-                estimator,
-                "feature_names_in_",
-                None,
-            )
-
-        if names is None or len(names) != len(values):
-            names = [
-                f"Fitur {i + 1}"
-                for i in range(len(values))
-            ]
-
-        result = pd.DataFrame({
-            "Fitur": list(names),
-            "Importance": values,
-        })
-
-        return result.sort_values(
-            "Importance",
-            ascending=False,
-        )
-
-    return pd.DataFrame()
-
-
-importance_df = get_feature_importance(model)
-
-if not importance_df.empty:
+# PERBAIKAN: Membaca langsung dari paket dictionary joblib Anda
+if isinstance(model, dict) and "fitur" in model and "fitur_importance" in model:
+    importance_df = pd.DataFrame({
+        "Fitur": model["fitur"],
+        "Importance": model["fitur_importance"]
+    }).sort_values("Importance", ascending=False)
+    
     st.sidebar.dataframe(
         importance_df,
         use_container_width=True,
@@ -328,12 +258,7 @@ if not importance_df.empty:
         height=260,
     )
 else:
-    st.sidebar.info(
-        "Model tidak menyediakan feature_importances_ "
-        "atau koefisien yang dapat ditampilkan. "
-        "Nilai importance tidak dibuat secara manual."
-    )
-
+    st.sidebar.info("Model tidak menyediakan feature_importances_.")
 
 # =========================================================
 # 5. METRIK F1-SCORE PER KELAS
