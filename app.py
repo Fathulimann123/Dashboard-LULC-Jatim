@@ -27,7 +27,7 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).resolve().parent
 GEOJSON_PATH = BASE_DIR / "sampel_uts_jatim_fix.geojson"
-MODEL_PATH = BASE_DIR / "model_LULC_jatim_fix.joblib"
+MODEL_PATH = BASE_DIR / "model_LULC_jatim_texture.joblib"
 
 CLASS_ORDER = [
     "Bangunan",
