@@ -1,88 +1,203 @@
-import streamlit as st
-import geopandas as gpd
-import pandas as pd
-import folium
-from streamlit_folium import st_folium
-import plotly.express as px
-import plotly.graph_objects as go
-import joblib
+import json
 import os
 
+import folium
+import geopandas as gpd
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from folium.raster_layers import ImageOverlay
+from streamlit_folium import st_folium
+
 # ==============================================================================
-# 1. KONFIGURASI HALAMAN & TEMA
+# 1. KONFIGURASI HALAMAN & BERKAS DATA
 # ==============================================================================
 st.set_page_config(page_title="Dashboard LULC Jawa Timur", layout="wide", page_icon="🌍")
 
-COLOR_MAP = {
-    "Bangunan": "#FF0000",   # Merah
-    "Pertanian": "#FBC02D",  # Kuning/Hijau Muda
-    "Air": "#2196F3",        # Biru
-    "Hutan": "#1B5E20",      # Hijau Tua
-    "Mangrove": "#8E24AA"    # Ungu
-}
+DATA_DIR = "data"                                # folder berisi PNG, peta_meta.json, metrik.json, luas_per_kelas.csv
+GEOJSON_PATH = "sampel_uts_jatim_fix.geojson"    # poligon sampel digitasi (versi terbaru, 490 poligon)
+CLASSES = ["Bangunan", "Pertanian", "Air", "Hutan", "Mangrove"]   # urutan label 0-4 di model
 
-# Data Metrik Hasil Evaluasi
-CLASSES = ["Bangunan", "Pertanian", "Air", "Hutan", "Mangrove"]
-PRECISION = [92, 49, 93, 69, 84]
-RECALL = [97, 46, 84, 79, 71]
-F1_SCORE = [95, 47, 88, 74, 77]
+# Pastikan berkas hasil notebook ada sebelum aplikasi lanjut
+BERKAS_WAJIB = ["peta_meta.json", "metrik.json", "luas_per_kelas.csv"] + [f"kelas_{k}.png" for k in CLASSES]
+hilang = [b for b in BERKAS_WAJIB if not os.path.exists(f"{DATA_DIR}/{b}")]
+if hilang:
+    st.error(f"Berkas berikut tidak ditemukan di folder '{DATA_DIR}/': {', '.join(hilang)}")
+    st.stop()
 
-# Data Confusion Matrix
-CM_DATA = [
-    [71, 0, 1, 1, 0],   
-    [1, 34, 0, 39, 0],  
-    [0, 0, 63, 0, 12],  
-    [0, 25, 0, 96, 0],  
-    [0, 0, 22, 0, 53]   
-]
-
-GEOJSON_PATH = "sampel_uts_jatim_fix.geojson"
 
 # ==============================================================================
-# 2. SIDEBAR PROFESIONAL (KIRI)
+# 2. FUNGSI PEMUAT DATA (di-cache agar dashboard cepat)
+# ==============================================================================
+@st.cache_data
+def muat_meta():
+    with open(f"{DATA_DIR}/peta_meta.json") as f:
+        meta = json.load(f)
+    # Warna RGB dari notebook diubah ke hex agar legenda, grafik, dan peta sama persis
+    warna = {k: "#%02x%02x%02x" % tuple(v) for k, v in meta["warna"].items()}
+    return meta["bounds"], warna
+
+
+@st.cache_data
+def muat_metrik():
+    with open(f"{DATA_DIR}/metrik.json") as f:
+        return json.load(f)
+
+
+@st.cache_data
+def muat_luas():
+    return pd.read_csv(f"{DATA_DIR}/luas_per_kelas.csv")
+
+
+@st.cache_data
+def muat_sampel():
+    gdf = gpd.read_file(GEOJSON_PATH).to_crs("EPSG:4326")
+    peta_awalan = {"b": "Bangunan", "p": "Pertanian", "s": "Pertanian",
+                   "a": "Air", "h": "Hutan", "m": "Mangrove"}
+    huruf = gdf["Nama"].astype(str).str.strip().str.lower().str[0]    # kelas dari huruf depan nama
+    gdf["Kelas"] = huruf.map(peta_awalan)
+    return gdf.dropna(subset=["Kelas"])[["Kelas", "geometry"]]
+
+
+bounds, COLOR_MAP = muat_meta()
+metrik = muat_metrik()
+luas = muat_luas()
+
+# Metrik evaluasi dibaca dari hasil notebook (bukan angka yang diketik manual)
+CM_DATA = metrik["confusion_matrix"]                       # baris = aktual, kolom = prediksi
+N_POLIGON = sum(sum(baris) for baris in CM_DATA)
+AKURASI = metrik["akurasi"] * 100
+report = metrik["report"]
+PRECISION = [round(report[k]["precision"] * 100, 1) for k in CLASSES]
+RECALL = [round(report[k]["recall"] * 100, 1) for k in CLASSES]
+F1_SCORE = [round(report[k]["f1-score"] * 100, 1) for k in CLASSES]
+
+# ==============================================================================
+# 3. SIDEBAR
 # ==============================================================================
 st.sidebar.markdown("### 🌍 Spasial LULC")
 st.sidebar.markdown("**Model:** Random Forest (Tekstur Spasial)")
 st.sidebar.markdown("**Sensor:** Sentinel-2A (ESA CDSE)")
-st.sidebar.markdown("**Akurasi Final:** 75.84%")
+st.sidebar.markdown(f"**Akurasi Validasi Wilayah:** {AKURASI:.2f}%")
 st.sidebar.divider()
 
 st.sidebar.markdown("### 🏷️ 5 KELAS TUTUPAN LAHAN")
-for kelas, color in COLOR_MAP.items():
+for kelas in CLASSES:
     st.sidebar.markdown(
         f"""
         <div style="display:flex; align-items:center; margin-bottom:8px;">
-            <span style="height:14px; width:14px; background-color:{color}; border-radius:50%; display:inline-block; margin-right:10px; border: 1px solid #ccc;"></span>
+            <span style="height:14px; width:14px; background-color:{COLOR_MAP[kelas]}; border-radius:50%; display:inline-block; margin-right:10px; border: 1px solid #ccc;"></span>
             <span style="font-size: 15px;">{kelas}</span>
         </div>
         """, unsafe_allow_html=True
     )
 
 st.sidebar.divider()
-# Identitas di Sidebar
 st.sidebar.markdown("**👨‍💻 Dikembangkan Oleh:**")
 st.sidebar.markdown("Muhammad Fathul Iman Wahid<br>NIM: 240411100180<br>Proyek Sains Data", unsafe_allow_html=True)
 
 # ==============================================================================
-# 3. HEADER & KONTEN METRIK (KANAN/UTAMA)
+# 4. HEADER & LUAS TIAP KELAS (INFORMASI HASIL PREDIKSI)
 # ==============================================================================
-st.title("📊 Evaluasi Kinerja Model & Pemetaan Spasial")
-st.markdown("Visualisasi interaktif hasil prediksi tutupan lahan dan performa metrik algoritma Random Forest.")
-st.markdown("<br>", unsafe_allow_html=True)
+st.title("🌍 Peta Tutupan Lahan Jawa Timur")
+st.markdown("Hasil klasifikasi tutupan lahan seluruh Jawa Timur dari citra Sentinel-2 (Random Forest, sel prediksi 100 × 100 m).")
+
+st.subheader("📐 Luas Tiap Kelas")
+kolom_luas = st.columns(len(CLASSES))
+for kolom, kelas in zip(kolom_luas, CLASSES):
+    baris = luas[luas["Kelas"] == kelas].iloc[0]
+    kolom.metric(label=kelas, value=f"{baris['Luas (ha)']:,.0f} ha")
+    kolom.caption(f"{baris['Persen (%)']:.1f}% dari area terpetakan")
+
+st.divider()
+
+# ==============================================================================
+# 5. PETA INTERAKTIF FOLIUM (HASIL PREDIKSI DI ATAS CITRA SATELIT)
+# ==============================================================================
+st.subheader("🗺️ Peta Hasil Klasifikasi")
+st.markdown(
+    "Gunakan **ikon kotak berlapis di pojok kanan atas peta** untuk mencentang atau "
+    "menghapus centang kelas lahan (misalnya hanya **Pertanian**). Poligon sampel hasil "
+    "digitasi tersedia sebagai layer tambahan (belum dicentang)."
+)
+
+selatan, barat = bounds[0]
+utara, timur = bounds[1]
+m = folium.Map(location=[(selatan + utara) / 2, (barat + timur) / 2], zoom_start=8, tiles=None)
+
+# Basemap
+folium.TileLayer(tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", attr="Google",
+                 name="Google Satellite", overlay=False, control=True).add_to(m)
+folium.TileLayer(tiles="OpenStreetMap", name="OpenStreetMap", overlay=False, control=True).add_to(m)
+
+# Layer hasil prediksi: 1 kelas = 1 FeatureGroup (centang untuk tampil/sembunyi)
+for kelas in CLASSES:
+    grup = folium.FeatureGroup(name=f"Prediksi: {kelas}", show=True)
+    ImageOverlay(image=f"{DATA_DIR}/kelas_{kelas}.png", bounds=bounds, opacity=1.0).add_to(grup)
+    grup.add_to(m)
+
+# Layer poligon sampel hasil digitasi (opsional, default tidak tampil)
+if os.path.exists(GEOJSON_PATH):
+    sampel = muat_sampel()
+    for kelas in CLASSES:
+        sub = sampel[sampel["Kelas"] == kelas]
+        if sub.empty:
+            continue
+        grup = folium.FeatureGroup(name=f"Sampel digitasi: {kelas}", show=False)
+        folium.GeoJson(
+            sub,
+            style_function=lambda fitur, w=COLOR_MAP[kelas]: {
+                "fillColor": w, "color": w, "weight": 1.5, "fillOpacity": 0.5},
+            tooltip=folium.GeoJsonTooltip(fields=["Kelas"], aliases=["Kelas lahan:"]),
+        ).add_to(grup)
+        grup.add_to(m)
+
+m.fit_bounds(bounds)                         # pas ke seluruh Jawa Timur saat dibuka
+folium.LayerControl(collapsed=False).add_to(m)
+
+# Identitas mahasiswa melayang di peta
+watermark_html = """
+<div style="
+    position: fixed;
+    bottom: 30px; left: 30px; width: 280px; height: auto;
+    background-color: rgba(255, 255, 255, 0.85);
+    border: 2px solid #004d40; z-index: 9999; font-size: 13px;
+    font-family: Arial, sans-serif; padding: 12px; border-radius: 8px;
+    box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
+    <b style="color: #004d40; font-size: 14px;">🎓 Proyek Sains Data</b><br>
+    <hr style="margin: 5px 0;">
+    <b>Nama:</b> Muhammad Fathul Iman Wahid<br>
+    <b>NIM:</b> 240411100180
+</div>
+"""
+m.get_root().html.add_child(folium.Element(watermark_html))
+
+st_folium(m, use_container_width=True, height=650, returned_objects=[])
+
+st.caption(
+    "Catatan: prediksi dilakukan per sel 100 × 100 m sehingga sel di batas dua jenis lahan "
+    "(misalnya mangrove dengan sawah, atau permukiman padat bervegetasi) hanya mendapat satu label. "
+    "Peta ini tidak memiliki data acuan penuh, sehingga akurasinya diperkirakan mengikuti "
+    "hasil validasi lintas wilayah di bawah."
+)
+
+st.divider()
+
+# ==============================================================================
+# 6. EVALUASI MODEL (DIBACA DARI metrik.json HASIL NOTEBOOK)
+# ==============================================================================
+st.subheader("📊 Evaluasi Kinerja Model")
+st.markdown(f"Validasi lintas wilayah pada **{N_POLIGON} poligon**: akurasi **{AKURASI:.2f}%**.")
 
 col_cm, col_bar = st.columns(2)
 
 with col_cm:
-    st.markdown("**Confusion Matrix (Data Uji 418 Poligon)**")
+    st.markdown(f"**Confusion Matrix ({N_POLIGON} Poligon, Validasi Lintas Wilayah)**")
     st.caption("Perbandingan kelas aktual lapangan vs hasil prediksi model.")
-    
     fig_cm = px.imshow(
-        CM_DATA, 
-        text_auto=True, 
-        color_continuous_scale='Teal',
-        x=CLASSES, 
-        y=CLASSES,
-        labels=dict(x="Hasil Prediksi Model", y="Kelas Ground Truth (Aktual)")
+        CM_DATA, text_auto=True, color_continuous_scale="Teal", x=CLASSES, y=CLASSES,
+        labels=dict(x="Hasil Prediksi Model", y="Kelas Ground Truth (Aktual)"),
     )
     fig_cm.update_layout(margin=dict(l=20, r=20, t=20, b=20), height=350)
     st.plotly_chart(fig_cm, use_container_width=True)
@@ -90,106 +205,11 @@ with col_cm:
 with col_bar:
     st.markdown("**Kinerja Klasifikasi per Kelas (Persentase %)**")
     st.caption("Metrik Precision, Recall, dan F1-Score pada 5 kelas lahan.")
-    
     fig_bar = go.Figure(data=[
-        go.Bar(name='Precision', y=CLASSES, x=PRECISION, orientation='h', marker_color='#80cbc4'),
-        go.Bar(name='Recall', y=CLASSES, x=RECALL, orientation='h', marker_color='#00897b'),
-        go.Bar(name='F1-Score', y=CLASSES, x=F1_SCORE, orientation='h', marker_color='#004d40')
+        go.Bar(name="Precision", y=CLASSES, x=PRECISION, orientation="h", marker_color="#80cbc4"),
+        go.Bar(name="Recall", y=CLASSES, x=RECALL, orientation="h", marker_color="#00897b"),
+        go.Bar(name="F1-Score", y=CLASSES, x=F1_SCORE, orientation="h", marker_color="#004d40"),
     ])
-    fig_bar.update_layout(barmode='group', margin=dict(l=20, r=20, t=20, b=20), height=350, yaxis={'categoryorder':'array', 'categoryarray': CLASSES[::-1]})
+    fig_bar.update_layout(barmode="group", margin=dict(l=20, r=20, t=20, b=20), height=350,
+                          yaxis={"categoryorder": "array", "categoryarray": CLASSES[::-1]})
     st.plotly_chart(fig_bar, use_container_width=True)
-
-st.divider()
-
-# ==============================================================================
-# 4. PETA INTERAKTIF FOLIUM (LAYER CONTROL & WATERMARK)
-# ==============================================================================
-st.subheader("🗺️ Peta Distribusi Spasial Tutupan Lahan")
-st.markdown("Gunakan **ikon kotak berlapis di pojok kanan atas peta** untuk mencentang/menghilangkan centang (*filtering*) kelas lahan yang ingin dilihat.")
-
-if os.path.exists(GEOJSON_PATH):
-    with st.spinner("Memuat data geospasial..."):
-        gdf = gpd.read_file(GEOJSON_PATH)
-        if gdf.crs != "EPSG:4326":
-            gdf = gdf.to_crs("EPSG:4326")
-
-        if "Nama" in gdf.columns:
-            peta_awalan = {"b": "Bangunan", "p": "Pertanian", "s": "Pertanian", "a": "Air", "h": "Hutan", "m": "Mangrove"}
-            gdf["huruf_depan"] = gdf["Nama"].astype(str).str.strip().str.lower().str[0]
-            gdf["Kelas"] = gdf["huruf_depan"].map(peta_awalan)
-        elif "kelas" in gdf.columns:
-            gdf["Kelas"] = gdf["kelas"].astype(str).str.title()
-        
-        gdf = gdf.dropna(subset=["Kelas"])
-
-        if not gdf.empty:
-            centroid = gdf.geometry.unary_union.centroid
-            
-            # PETA DIINISIALISASI (Bebas digeser dan di-zoom)
-            m = folium.Map(location=[centroid.y, centroid.x], zoom_start=11, tiles=None)
-
-            # Basemap
-            folium.TileLayer(
-                tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-                attr='Google',
-                name='Google Satellite',
-                overlay=False,
-                control=True
-            ).add_to(m)
-            
-            folium.TileLayer(
-                tiles='OpenStreetMap',
-                name='OpenStreetMap',
-                overlay=False,
-                control=True
-            ).add_to(m)
-
-            # Feature Group untuk Filter Native
-            grup_layer = {}
-            for kelas in COLOR_MAP.keys():
-                grup_layer[kelas] = folium.FeatureGroup(name=f"Kelas: {kelas}", show=True)
-                m.add_child(grup_layer[kelas])
-
-            for _, row in gdf.iterrows():
-                kelas_objek = row["Kelas"]
-                warna = COLOR_MAP.get(kelas_objek, "#FFFFFF")
-                
-                folium.GeoJson(
-                    row.geometry.__geo_interface__,
-                    style_function=lambda x, w=warna: {
-                        'fillColor': w,
-                        'color': w,           
-                        'weight': 1.5,        
-                        'fillOpacity': 0.6    
-                    },
-                    tooltip=folium.Tooltip(f"<b>Kelas Lahan:</b> {kelas_objek}", style="font-size: 14px;")
-                ).add_to(grup_layer[kelas_objek])
-
-            # Mengaktifkan Layer Control
-            folium.LayerControl(collapsed=False).add_to(m)
-
-            # ==================================================================
-            # WATERMARK IDENTITAS MAHASISWA MELAYANG DI PETA
-            # ==================================================================
-            watermark_html = """
-            <div style="
-                position: fixed; 
-                bottom: 30px; left: 30px; width: 280px; height: auto; 
-                background-color: rgba(255, 255, 255, 0.85);
-                border: 2px solid #004d40; z-index: 9999; font-size: 13px;
-                font-family: Arial, sans-serif; padding: 12px; border-radius: 8px;
-                box-shadow: 2px 2px 5px rgba(0,0,0,0.3);">
-                <b style="color: #004d40; font-size: 14px;">🎓 Proyek Sains Data</b><br>
-                <hr style="margin: 5px 0;">
-                <b>Nama:</b> Muhammad Fathul Iman Wahid<br>
-                <b>NIM:</b> 240411100180
-            </div>
-            """
-            m.get_root().html.add_child(folium.Element(watermark_html))
-
-            # Render peta ke Streamlit
-            st_folium(m, use_container_width=True, height=600, returned_objects=[])
-        else:
-            st.error("Data valid tidak ditemukan di dalam GeoJSON.")
-else:
-    st.error(f"File '{GEOJSON_PATH}' tidak ditemukan. Pastikan sudah diunggah ke GitHub.")
