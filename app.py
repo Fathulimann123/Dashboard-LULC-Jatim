@@ -15,9 +15,16 @@ from streamlit_folium import st_folium
 # ==============================================================================
 st.set_page_config(page_title="Dashboard LULC Jawa Timur", layout="wide", page_icon="🌍")
 
-DATA_DIR = "data"                                # folder berisi PNG, peta_meta.json, metrik.json, luas_per_kelas.csv
-GEOJSON_PATH = "sampel_uts_jatim_fix.geojson"    # poligon sampel digitasi (versi terbaru, 490 poligon)
-CLASSES = ["Bangunan", "Pertanian", "Air", "Hutan", "Mangrove"]   # urutan label 0-4 di model
+DATA_DIR = "data"
+CLASSES = ["Bangunan", "Pertanian", "Air", "Hutan", "Mangrove"]
+
+# Cek otomatis apakah geojson ada di root atau di dalam folder data/
+if os.path.exists("sampel_uts_jatim_fix.geojson"):
+    GEOJSON_PATH = "sampel_uts_jatim_fix.geojson"
+elif os.path.exists(f"{DATA_DIR}/sampel_uts_jatim_fix.geojson"):
+    GEOJSON_PATH = f"{DATA_DIR}/sampel_uts_jatim_fix.geojson"
+else:
+    GEOJSON_PATH = None
 
 # Pastikan berkas hasil notebook ada sebelum aplikasi lanjut
 BERKAS_WAJIB = ["peta_meta.json", "metrik.json", "luas_per_kelas.csv"] + [f"kelas_{k}.png" for k in CLASSES]
@@ -28,50 +35,58 @@ if hilang:
 
 
 # ==============================================================================
-# 2. FUNGSI PEMUAT DATA (di-cache agar dashboard cepat)
+# 2. FUNGSI PEMUAT DATA (Diberi parameter mtime agar cache otomatis update!)
 # ==============================================================================
 @st.cache_data
-def muat_meta():
+def muat_meta(_mtime):
     with open(f"{DATA_DIR}/peta_meta.json") as f:
         meta = json.load(f)
-    # Warna RGB dari notebook diubah ke hex agar legenda, grafik, dan peta sama persis
     warna = {k: "#%02x%02x%02x" % tuple(v) for k, v in meta["warna"].items()}
     return meta["bounds"], warna
 
 
 @st.cache_data
-def muat_metrik():
+def muat_metrik(_mtime):
     with open(f"{DATA_DIR}/metrik.json") as f:
         return json.load(f)
 
 
 @st.cache_data
-def muat_luas():
+def muat_luas(_mtime):
     return pd.read_csv(f"{DATA_DIR}/luas_per_kelas.csv")
 
 
 @st.cache_data
-def muat_sampel():
-    gdf = gpd.read_file(GEOJSON_PATH).to_crs("EPSG:4326")
+def muat_sampel(path_geojson, _mtime):
+    gdf = gpd.read_file(path_geojson).to_crs("EPSG:4326")
     peta_awalan = {"b": "Bangunan", "p": "Pertanian", "s": "Pertanian",
                    "a": "Air", "h": "Hutan", "m": "Mangrove"}
-    huruf = gdf["Nama"].astype(str).str.strip().str.lower().str[0]    # kelas dari huruf depan nama
+    huruf = gdf["Nama"].astype(str).str.strip().str.lower().str[0]
     gdf["Kelas"] = huruf.map(peta_awalan)
     return gdf.dropna(subset=["Kelas"])[["Kelas", "geometry"]]
 
 
-bounds, COLOR_MAP = muat_meta()
-metrik = muat_metrik()
-luas = muat_luas()
+bounds, COLOR_MAP = muat_meta(os.path.getmtime(f"{DATA_DIR}/peta_meta.json"))
+metrik = muat_metrik(os.path.getmtime(f"{DATA_DIR}/metrik.json"))
+luas = muat_luas(os.path.getmtime(f"{DATA_DIR}/luas_per_kelas.csv"))
 
-# Metrik evaluasi dibaca dari hasil notebook (bukan angka yang diketik manual)
-CM_DATA = metrik["confusion_matrix"]                       # baris = aktual, kolom = prediksi
+# Pengaman: Cek jika koordinat di peta_meta.json masih berupa meter UTM (> 180)
+if abs(bounds[0][0]) > 90 or abs(bounds[0][1]) > 180:
+    st.error("⚠️ Koordinat di `peta_meta.json` masih menggunakan satuan Meter (UTM), bukan Derajat (Latitude/Longitude)!")
+    st.stop()
+
+CM_DATA = metrik["confusion_matrix"]
 N_POLIGON = sum(sum(baris) for baris in CM_DATA)
 AKURASI = metrik["akurasi"] * 100
 report = metrik["report"]
-PRECISION = [round(report[k]["precision"] * 100, 1) for k in CLASSES]
-RECALL = [round(report[k]["recall"] * 100, 1) for k in CLASSES]
-F1_SCORE = [round(report[k]["f1-score"] * 100, 1) for k in CLASSES]
+
+# Fleksibel membaca nama kelas di report (baik "Bangunan" maupun "Bangunan (0)")
+PRECISION, RECALL, F1_SCORE = [], [], []
+for idx, k in enumerate(CLASSES):
+    kunci = k if k in report else f"{k} ({idx})"
+    PRECISION.append(round(report[kunci]["precision"] * 100, 1))
+    RECALL.append(round(report[kunci]["recall"] * 100, 1))
+    F1_SCORE.append(round(report[kunci]["f1-score"] * 100, 1))
 
 # ==============================================================================
 # 3. SIDEBAR
@@ -131,15 +146,15 @@ folium.TileLayer(tiles="https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}", att
                  name="Google Satellite", overlay=False, control=True).add_to(m)
 folium.TileLayer(tiles="OpenStreetMap", name="OpenStreetMap", overlay=False, control=True).add_to(m)
 
-# Layer hasil prediksi: 1 kelas = 1 FeatureGroup (centang untuk tampil/sembunyi)
+# Layer hasil prediksi: 1 kelas = 1 FeatureGroup
 for kelas in CLASSES:
     grup = folium.FeatureGroup(name=f"Prediksi: {kelas}", show=True)
-    ImageOverlay(image=f"{DATA_DIR}/kelas_{kelas}.png", bounds=bounds, opacity=1.0).add_to(grup)
+    ImageOverlay(image=f"{DATA_DIR}/kelas_{kelas}.png", bounds=bounds, opacity=0.85).add_to(grup)
     grup.add_to(m)
 
-# Layer poligon sampel hasil digitasi (opsional, default tidak tampil)
-if os.path.exists(GEOJSON_PATH):
-    sampel = muat_sampel()
+# Layer poligon sampel hasil digitasi
+if GEOJSON_PATH:
+    sampel = muat_sampel(GEOJSON_PATH, os.path.getmtime(GEOJSON_PATH))
     for kelas in CLASSES:
         sub = sampel[sampel["Kelas"] == kelas]
         if sub.empty:
@@ -152,8 +167,10 @@ if os.path.exists(GEOJSON_PATH):
             tooltip=folium.GeoJsonTooltip(fields=["Kelas"], aliases=["Kelas lahan:"]),
         ).add_to(grup)
         grup.add_to(m)
+else:
+    st.warning("Catatan: File 'sampel_uts_jatim_fix.geojson' tidak ditemukan, layer sampel digitasi dilewati.")
 
-m.fit_bounds(bounds)                         # pas ke seluruh Jawa Timur saat dibuka
+m.fit_bounds(bounds)
 folium.LayerControl(collapsed=False).add_to(m)
 
 # Identitas mahasiswa melayang di peta
