@@ -67,6 +67,7 @@ def muat_sampel(path_geojson, _mtime):
 
 
 bounds, COLOR_MAP = muat_meta(os.path.getmtime(f"{DATA_DIR}/peta_meta.json"))
+bounds = [[-9.12, 110.85], [-4.92, 116.88]]
 metrik = muat_metrik(os.path.getmtime(f"{DATA_DIR}/metrik.json"))
 luas = muat_luas(os.path.getmtime(f"{DATA_DIR}/luas_per_kelas.csv"))
 
