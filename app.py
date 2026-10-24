@@ -200,7 +200,6 @@ st.caption(
 )
 
 st.divider()
-
 # ==============================================================================
 # 6. EVALUASI MODEL (DIBACA DARI metrik.json HASIL NOTEBOOK)
 # ==============================================================================
@@ -217,7 +216,7 @@ with col_cm:
         labels=dict(x="Hasil Prediksi Model", y="Kelas Ground Truth (Aktual)"),
     )
     fig_cm.update_layout(margin=dict(l=20, r=20, t=20, b=20), height=350)
-    st.plotly_chart(fig_cm, use_container_width=True)
+    st.plotly_chart(fig_cm, width="stretch")  # <-- Sudah diganti dari use_container_width=True
 
 with col_bar:
     st.markdown("**Kinerja Klasifikasi per Kelas (Persentase %)**")
@@ -229,4 +228,4 @@ with col_bar:
     ])
     fig_bar.update_layout(barmode="group", margin=dict(l=20, r=20, t=20, b=20), height=350,
                           yaxis={"categoryorder": "array", "categoryarray": CLASSES[::-1]})
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.plotly_chart(fig_bar, width="stretch")  # <-- Sudah diganti dari use_container_width=True
