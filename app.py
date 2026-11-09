@@ -1,4 +1,5 @@
 import json
+import math
 import os
 
 import folium
@@ -67,13 +68,25 @@ def muat_sampel(path_geojson, _mtime):
 
 
 bounds, COLOR_MAP = muat_meta(os.path.getmtime(f"{DATA_DIR}/peta_meta.json"))
-bounds = [[-9.12, 110.85], [-4.92, 116.88]]
 metrik = muat_metrik(os.path.getmtime(f"{DATA_DIR}/metrik.json"))
 luas = muat_luas(os.path.getmtime(f"{DATA_DIR}/luas_per_kelas.csv"))
 
-# Pengaman: Cek jika koordinat di peta_meta.json masih berupa meter UTM (> 180)
-if abs(bounds[0][0]) > 90 or abs(bounds[0][1]) > 180:
-    st.error("⚠️ Koordinat di `peta_meta.json` masih menggunakan satuan Meter (UTM), bukan Derajat (Latitude/Longitude)!")
+if not (
+    isinstance(bounds, list)
+    and len(bounds) == 2
+    and all(isinstance(sudut, list) and len(sudut) == 2 for sudut in bounds)
+):
+    st.error("Format `bounds` di `peta_meta.json` harus berupa [[selatan, barat], [utara, timur]].")
+    st.stop()
+
+(selatan, barat), (utara, timur) = bounds
+koordinat = (selatan, barat, utara, timur)
+if not all(type(nilai) in (int, float) and math.isfinite(nilai) for nilai in koordinat):
+    st.error("Semua koordinat `bounds` di `peta_meta.json` harus berupa angka yang valid.")
+    st.stop()
+
+if not (-90 <= selatan < utara <= 90 and -180 <= barat < timur <= 180):
+    st.error("Koordinat `bounds` di `peta_meta.json` harus berupa rentang Latitude/Longitude yang valid.")
     st.stop()
 
 CM_DATA = metrik["confusion_matrix"]
